@@ -6,14 +6,6 @@ A browser-based 3D game where you control a ball rolling down a procedurally gen
 
 Open `index.html` in any modern browser. That's it.
 
-Alternatively, serve it locally:
-
-```bash
-npx serve .
-# or
-python -m http.server
-```
-
 ### Controls
 
 | Action      | Keyboard       | Xbox Controller        |
