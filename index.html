@@ -243,7 +243,15 @@
         createBall();
 
         // Events
-        window.addEventListener('keydown', (e) => { keys[e.key] = true; e.preventDefault(); });
+        window.addEventListener('keydown', (e) => {
+            keys[e.key] = true;
+            if (gameState === 'gameover' && e.code === 'Space') {
+                startGame();
+                e.preventDefault();
+                return;
+            }
+            e.preventDefault();
+        });
         window.addEventListener('keyup', (e) => { keys[e.key] = false; });
         window.addEventListener('resize', onResize);
         startBtn.addEventListener('click', startGame);
@@ -628,6 +636,16 @@
         finalScore.style.display = 'block';
         finalScore.textContent = 'Final Score: ' + Math.floor(score);
         startBtn.textContent = 'RETRY';
+        
+        // Remove existing hint if present
+        const existingHint = document.querySelector('.restart-hint');
+        if (existingHint) existingHint.remove();
+        
+        // Add restart hint
+        const hintDiv = document.createElement('div');
+        hintDiv.className = 'instructions restart-hint';
+        hintDiv.innerHTML = '<strong>Press SPACE or A to restart</strong>';
+        overlay.insertBefore(hintDiv, startBtn);
         overlay.classList.remove('hidden');
     }
 
@@ -660,14 +678,19 @@
             const axisX = gp.axes[0];  // Left stick horizontal
             const buttons = gp.buttons;
             
-            // A button (index 0) - Pause/Resume toggle
-            if (buttons[0] && buttons[0].pressed) {
-                gameState = 'menu';
-                overlay.classList.remove('hidden');
-                overlayTitle.textContent = 'Paused';
-                overlaySubtitle.textContent = 'Press A to resume or Start the game';
-                finalScore.style.display = 'none';
-                startBtn.textContent = 'START';
+            // Y button (index 2) - Pause toggle (press again to resume)
+            if (buttons[2] && buttons[2].pressed) {
+                if (gameState === 'playing') {
+                    gameState = 'menu';
+                    overlay.classList.remove('hidden');
+                    overlayTitle.textContent = 'Paused';
+                    overlaySubtitle.textContent = 'Press Y again to resume';
+                    finalScore.style.display = 'none';
+                    startBtn.textContent = 'START';
+                } else if (gameState === 'menu') {
+                    overlay.classList.add('hidden');
+                    gameState = 'playing';
+                }
                 return;
             }
 
@@ -884,6 +907,15 @@
         requestAnimationFrame(animate);
         const dt = Math.min(clock.getDelta(), 0.05);
         update(dt);
+        
+        // Check controller A button for restart
+        if (gamepad) {
+            const gp = navigator.getGamepads()[0];
+            if (gp && gp.buttons[0] && gp.buttons[0].pressed && gameState === 'gameover') {
+                startGame();
+            }
+        }
+        
         renderer.render(scene, camera);
     }
 
