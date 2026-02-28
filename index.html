@@ -102,6 +102,7 @@
     <div class="stat">Score: <span class="score-value" id="scoreDisplay">0</span></div>
     <div class="stat">Speed: <span class="speed-value" id="speedDisplay">0</span></div>
     <div class="stat">Level: <span class="level-value" id="levelDisplay">1</span></div>
+    <div class="stat" id="controllerStatus" style="display: none;">Controller: Connected</div>
 </div>
 
 <div id="overlay">
@@ -111,6 +112,10 @@
     <div class="instructions">
         <kbd>&uarr;</kbd> Accelerate &nbsp; <kbd>&darr;</kbd> Brake<br>
         <kbd>&larr;</kbd> Steer Left &nbsp; <kbd>&rarr;</kbd> Steer Right
+    </div>
+    <div class="instructions">
+        <strong style="color: #FFD700;">🎮 XBOX Controller:</strong><br>
+        ⟨Stick⟩ Speed | ⟨←→⟩ Steer | A: Pause | B: Brake
     </div>
     <button id="startBtn">START</button>
 </div>
@@ -175,6 +180,8 @@
 
     const keys = {};
     const clock = new THREE.Clock();
+    let gamepad = null;
+    const DEADZONE = 0.15;
 
     // DOM refs
     const scoreDisplay = document.getElementById('scoreDisplay');
@@ -240,6 +247,14 @@
         window.addEventListener('keyup', (e) => { keys[e.key] = false; });
         window.addEventListener('resize', onResize);
         startBtn.addEventListener('click', startGame);
+        window.addEventListener('gamepadconnected', (e) => {
+            gamepad = e.gamepad;
+            console.log('XBOX controller connected:', gamepad.id);
+        });
+        window.addEventListener('gamepaddisconnected', () => {
+            gamepad = null;
+            console.log('Controller disconnected');
+        });
 
         // Start render
         animate();
@@ -637,25 +652,87 @@
         if (gameState !== 'playing') return;
         if (!roadCurve) return;
 
-        // Speed control
-        if (keys['ArrowUp']) {
-            speed = Math.min(speed + ACCELERATION, MAX_SPEED);
-        } else if (keys['ArrowDown']) {
-            speed = Math.max(speed - DECELERATION, 0);
-        } else {
-            // Auto-accelerate to base speed
-            if (speed < BASE_SPEED) {
-                speed = Math.min(speed + ACCELERATION * 0.5, BASE_SPEED);
+        const gp = gamepad ? navigator.getGamepads()[0] : null;
+        let useController = gamepad !== null;
+
+        if (useController && gp) {
+            const axisY = gp.axes[1]; // Left stick vertical
+            const axisX = gp.axes[0];  // Left stick horizontal
+            const buttons = gp.buttons;
+            
+            // A button (index 0) - Pause/Resume toggle
+            if (buttons[0] && buttons[0].pressed) {
+                gameState = 'menu';
+                overlay.classList.remove('hidden');
+                overlayTitle.textContent = 'Paused';
+                overlaySubtitle.textContent = 'Press A to resume or Start the game';
+                finalScore.style.display = 'none';
+                startBtn.textContent = 'START';
+                return;
             }
-            speed = Math.max(speed - FRICTION, 0);
+
+            // B button (index 1) - Quick brake
+            if (buttons[1] && buttons[1].pressed) {
+                speed = Math.max(speed - DECELERATION * 3, 0);
+                useController = false;
+            } else {
+                // Normal speed control from stick
+                if (axisY > DEADZONE) {
+                    speed = Math.min(speed + ACCELERATION, MAX_SPEED);
+                } else if (axisY < -DEADZONE) {
+                    speed = Math.max(speed - DECELERATION, 0);
+                } else {
+                    if (speed < BASE_SPEED) {
+                        speed = Math.min(speed + ACCELERATION * 0.5, BASE_SPEED);
+                    }
+                    speed = Math.max(speed - FRICTION, 0);
+                }
+
+                // Steering from stick horizontal
+                if (axisX < -DEADZONE) {
+                    lateralOffset -= STEER_SPEED * (1 + speed * 2);
+                }
+                if (axisX > DEADZONE) {
+                    lateralOffset += STEER_SPEED * (1 + speed * 2);
+                }
+            }
+
+            // LB (index 6) - Fine steer left
+            if (buttons[6] && buttons[6].pressed) {
+                lateralOffset -= STEER_SPEED * 0.5 * (1 + speed * 2);
+                useController = false;
+            }
+            // RB (index 7) - Fine steer right
+            if (buttons[7] && buttons[7].pressed) {
+                lateralOffset += STEER_SPEED * 0.5 * (1 + speed * 2);
+                useController = false;
+            }
+
+            document.getElementById('controllerStatus').style.display = 'block';
         }
 
-        // Steering
-        if (keys['ArrowLeft']) {
-            lateralOffset -= STEER_SPEED * (1 + speed * 2);
-        }
-        if (keys['ArrowRight']) {
-            lateralOffset += STEER_SPEED * (1 + speed * 2);
+        if (!useController) {
+            // Speed control from keyboard
+            if (keys['ArrowUp']) {
+                speed = Math.min(speed + ACCELERATION, MAX_SPEED);
+            } else if (keys['ArrowDown']) {
+                speed = Math.max(speed - DECELERATION, 0);
+            } else {
+                if (speed < BASE_SPEED) {
+                    speed = Math.min(speed + ACCELERATION * 0.5, BASE_SPEED);
+                }
+                speed = Math.max(speed - FRICTION, 0);
+            }
+
+            // Steering from keyboard
+            if (keys['ArrowLeft']) {
+                lateralOffset -= STEER_SPEED * (1 + speed * 2);
+            }
+            if (keys['ArrowRight']) {
+                lateralOffset += STEER_SPEED * (1 + speed * 2);
+            }
+
+            document.getElementById('controllerStatus').style.display = 'none';
         }
 
         // Clamp lateral offset to road width
