@@ -44,6 +44,18 @@ ballGame.road.rebuildRoadCurve = function() {
     state.roadCurve = new THREE.CatmullRomCurve3(state.roadPoints, false, 'catmullrom', 0.5);
 };
 
+// ─── getRightAt ─────────────────────────────────────────
+// Road-space "right" vector (perpendicular to the road, in the XZ plane) at
+// curve parameter t. Derived from the curve tangent rather than from a
+// p1->p2 chord, so the value depends only on t. Two quads that meet at the
+// same t therefore get the exact same vector -- which is what makes the
+// road seamless (see buildRoadMesh).
+ballGame.road.getRightAt = function(t) {
+    const clamped = Math.min(Math.max(t, 0), 1);
+    const tan = ballGame.state.roadCurve.getTangent(clamped);
+    return new THREE.Vector3(-tan.z, 0, tan.x).normalize();
+};
+
 // ─── buildRoadMesh ──────────────────────────────────────
 ballGame.road.buildRoadMesh = function(startIdx, endIdx) {
     const state = ballGame.state;
@@ -52,76 +64,89 @@ ballGame.road.buildRoadMesh = function(startIdx, endIdx) {
     if (!state.roadCurve || state.roadPoints.length < 4) return;
 
     const divisions = (endIdx - startIdx) * 3;
+    const hw = config.ROAD_WIDTH / 2;
+    const denom = state.roadPoints.length - 1;
+
+    function paramAt(step) {
+        return (startIdx + (step / divisions) * (endIdx - startIdx)) / denom;
+    }
+
+    // Walk the curve one cross-section at a time and carry the previous
+    // section forward: the far edge of quad i becomes the near edge of
+    // quad i+1, vertex for vertex. Computing a single `right` per quad (from
+    // the p1->p2 chord) and applying it to both ends leaves wedge-shaped
+    // gaps on the outside of every bend, which is what used to show through
+    // as hairlines across the road.
+    let t1 = paramAt(0);
+    let p1 = state.roadCurve.getPoint(Math.min(Math.max(t1, 0), 1));
+    let right1 = ballGame.road.getRightAt(t1);
 
     for (let i = 0; i < divisions; i++) {
-        const t1 = (startIdx + (i / divisions) * (endIdx - startIdx)) / (state.roadPoints.length - 1);
-        const t2 = (startIdx + ((i + 1) / divisions) * (endIdx - startIdx)) / (state.roadPoints.length - 1);
+        const t2 = paramAt(i + 1);
+        const p2 = state.roadCurve.getPoint(Math.min(Math.max(t2, 0), 1));
+        const right2 = ballGame.road.getRightAt(t2);
 
-        if (t1 < 0 || t1 > 1 || t2 < 0 || t2 > 1) continue;
+        if (t1 >= 0 && t1 <= 1 && t2 >= 0 && t2 <= 1) {
+            // Road surface quad - each end uses the normal of its own section
+            const v0 = p1.clone().add(right1.clone().multiplyScalar(-hw));
+            const v1 = p1.clone().add(right1.clone().multiplyScalar(hw));
+            const v2 = p2.clone().add(right2.clone().multiplyScalar(hw));
+            const v3 = p2.clone().add(right2.clone().multiplyScalar(-hw));
 
-        const p1 = state.roadCurve.getPoint(Math.min(t1, 1));
-        const p2 = state.roadCurve.getPoint(Math.min(t2, 1));
+            const geom = new THREE.BufferGeometry();
+            const vertices = new Float32Array([
+                v0.x, 0.01, v0.z,
+                v1.x, 0.01, v1.z,
+                v2.x, 0.01, v2.z,
+                v0.x, 0.01, v0.z,
+                v2.x, 0.01, v2.z,
+                v3.x, 0.01, v3.z,
+            ]);
+            geom.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+            geom.computeVertexNormals();
 
-        const dir = new THREE.Vector3().subVectors(p2, p1).normalize();
-        const right = new THREE.Vector3(-dir.z, 0, dir.x);
+            const roadMesh = new THREE.Mesh(geom, new THREE.MeshLambertMaterial({ color: config.COLORS.road }));
+            roadMesh.receiveShadow = true;
+            state.scene.add(roadMesh);
+            state.roadMeshes.push(roadMesh);
 
-        const hw = config.ROAD_WIDTH / 2;
+            // Edge lines (white dashes)
+            if (i % 3 === 0) {
+                const edgeGeo = new THREE.BoxGeometry(0.2, 0.05, 1.2);
+                const edgeMat = new THREE.MeshLambertMaterial({ color: config.COLORS.roadEdge });
 
-        // Road surface quad
-        const v0 = new THREE.Vector3().copy(p1).add(right.clone().multiplyScalar(-hw));
-        const v1 = new THREE.Vector3().copy(p1).add(right.clone().multiplyScalar(hw));
-        const v2 = new THREE.Vector3().copy(p2).add(right.clone().multiplyScalar(hw));
-        const v3 = new THREE.Vector3().copy(p2).add(right.clone().multiplyScalar(-hw));
+                const leftEdge = new THREE.Mesh(edgeGeo, edgeMat);
+                leftEdge.position.copy(p1).add(right1.clone().multiplyScalar(-hw + 0.3));
+                leftEdge.position.y = 0.03;
+                leftEdge.lookAt(p2.clone().add(right2.clone().multiplyScalar(-hw + 0.3)));
+                state.scene.add(leftEdge);
+                state.edgeMeshes.push(leftEdge);
 
-        const geom = new THREE.BufferGeometry();
-        const vertices = new Float32Array([
-            v0.x, 0.01, v0.z,
-            v1.x, 0.01, v1.z,
-            v2.x, 0.01, v2.z,
-            v0.x, 0.01, v0.z,
-            v2.x, 0.01, v2.z,
-            v3.x, 0.01, v3.z,
-        ]);
-        geom.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
-        geom.computeVertexNormals();
+                const rightEdge = new THREE.Mesh(edgeGeo, edgeMat);
+                rightEdge.position.copy(p1).add(right1.clone().multiplyScalar(hw - 0.3));
+                rightEdge.position.y = 0.03;
+                rightEdge.lookAt(p2.clone().add(right2.clone().multiplyScalar(hw - 0.3)));
+                state.scene.add(rightEdge);
+                state.edgeMeshes.push(rightEdge);
+            }
 
-        const roadMesh = new THREE.Mesh(geom, new THREE.MeshLambertMaterial({ color: config.COLORS.road }));
-        roadMesh.receiveShadow = true;
-        state.scene.add(roadMesh);
-        state.roadMeshes.push(roadMesh);
-
-        // Edge lines (white dashes)
-        if (i % 3 === 0) {
-            const edgeGeo = new THREE.BoxGeometry(0.2, 0.05, 1.2);
-            const edgeMat = new THREE.MeshLambertMaterial({ color: config.COLORS.roadEdge });
-
-            const leftEdge = new THREE.Mesh(edgeGeo, edgeMat);
-            leftEdge.position.copy(p1).add(right.clone().multiplyScalar(-hw + 0.3));
-            leftEdge.position.y = 0.03;
-            leftEdge.lookAt(p2.clone().add(right.clone().multiplyScalar(-hw + 0.3)));
-            state.scene.add(leftEdge);
-            state.edgeMeshes.push(leftEdge);
-
-            const rightEdge = new THREE.Mesh(edgeGeo, edgeMat);
-            rightEdge.position.copy(p1).add(right.clone().multiplyScalar(hw - 0.3));
-            rightEdge.position.y = 0.03;
-            rightEdge.lookAt(p2.clone().add(right.clone().multiplyScalar(hw - 0.3)));
-            state.scene.add(rightEdge);
-            state.edgeMeshes.push(rightEdge);
+            // Center dashes (gold)
+            if (i % 6 === 0) {
+                const dashGeo = new THREE.BoxGeometry(0.12, 0.04, 0.8);
+                const dashMat = new THREE.MeshLambertMaterial({ color: config.COLORS.roadCenter });
+                const dash = new THREE.Mesh(dashGeo, dashMat);
+                const mid = new THREE.Vector3().lerpVectors(p1, p2, 0.5);
+                dash.position.copy(mid);
+                dash.position.y = 0.04;
+                dash.lookAt(p2);
+                state.scene.add(dash);
+                state.edgeMeshes.push(dash);
+            }
         }
 
-        // Center dashes (gold)
-        if (i % 6 === 0) {
-            const dashGeo = new THREE.BoxGeometry(0.12, 0.04, 0.8);
-            const dashMat = new THREE.MeshLambertMaterial({ color: config.COLORS.roadCenter });
-            const dash = new THREE.Mesh(dashGeo, dashMat);
-            const mid = new THREE.Vector3().lerpVectors(p1, p2, 0.5);
-            dash.position.copy(mid);
-            dash.position.y = 0.04;
-            dash.lookAt(p2);
-            state.scene.add(dash);
-            state.edgeMeshes.push(dash);
-        }
+        t1 = t2;
+        p1 = p2;
+        right1 = right2;
     }
 };
 

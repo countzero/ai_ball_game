@@ -49,6 +49,8 @@ ballGame.state = {
 
     ball: null,       // the inner mesh
     ballGroup: null,  // the group (positioned on road)
+    ground: null,     // ground plane (re-centred on the ball every frame)
+    dirLight: null,   // sun (moved with the ball so its shadow frustum keeps up)
 
     roadPoints: [],
     roadCurve: null,
@@ -69,5 +71,9 @@ ballGame.state = {
 
     keys: {},
     gamepad: null,
+    gamepadIndex: null,    // index into navigator.getGamepads() of the active pad
+    prevPadButtons: [],    // previous frame's button states, for rising-edge detection
+    padInput: { throttle: 0, brake: 0, steer: 0 },
+    steerInput: 0,         // combined steer axis this frame (-1..1), drives ball lean
     clock: null
 };

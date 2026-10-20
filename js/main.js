@@ -26,11 +26,23 @@ ballGame.main.setupEvents = function() {
 
     window.addEventListener('keydown', function(e) {
         state.keys[e.key] = true;
-        if (state.gameState === 'gameover' && e.code === 'Space') {
-            ballGame.main.startGame();
+
+        if (e.code === 'Space') {
+            if (state.gameState === 'gameover' || state.gameState === 'menu') ballGame.main.startGame();
+            else if (state.gameState === 'paused') ballGame.main.setPaused(false);
             e.preventDefault();
             return;
         }
+
+        // Keyboard equivalent of the pad's pause button (fires on the keydown
+        // edge, so holding the key does not thrash the state).
+        if ((e.code === 'Escape' || e.code === 'KeyP') && !e.repeat) {
+            if (state.gameState === 'playing') ballGame.main.setPaused(true);
+            else if (state.gameState === 'paused') ballGame.main.setPaused(false);
+            e.preventDefault();
+            return;
+        }
+
         e.preventDefault();
     });
 
@@ -38,17 +50,191 @@ ballGame.main.setupEvents = function() {
         state.keys[e.key] = false;
     });
 
-    startBtn.addEventListener('click', ballGame.main.startGame);
+    startBtn.addEventListener('click', function() { ballGame.main.onStartButton(); });
 
     window.addEventListener('gamepadconnected', function(e) {
-        state.gamepad = e.gamepad;
-        console.log('XBOX controller connected:', state.gamepad.id);
+        // Latch onto the first pad that reports in -- that is the one the
+        // player actually pressed a button on. Do not let a second pad
+        // waking up later steal control from the one in use.
+        if (state.gamepadIndex === null) {
+            state.gamepadIndex = e.gamepad.index;
+            state.gamepad = e.gamepad;
+            console.log('Controller connected (slot ' + e.gamepad.index + '):', e.gamepad.id);
+        } else {
+            console.log('Additional controller ignored (slot ' + e.gamepad.index + '):', e.gamepad.id);
+        }
     });
 
-    window.addEventListener('gamepaddisconnected', function() {
-        state.gamepad = null;
-        console.log('Controller disconnected');
+    window.addEventListener('gamepaddisconnected', function(e) {
+        // Only drop the pad we are actually driving with. The old handler
+        // cleared it unconditionally, so switching off an idle second
+        // controller killed input from the active one.
+        if (state.gamepadIndex === e.gamepad.index) {
+            state.gamepadIndex = null;
+            state.gamepad = null;
+            state.prevPadButtons = [];
+            state.padInput.throttle = state.padInput.brake = state.padInput.steer = 0;
+            console.log('Active controller disconnected (slot ' + e.gamepad.index + ')');
+        }
     });
+};
+
+// ─── gamepad helpers ────────────────────────────────────
+
+// Xbox / "standard" gamepad mapping
+var BTN = { A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7, START: 9, DPAD_L: 14, DPAD_R: 15 };
+
+function padHasInput(pad) {
+    const DEADZONE = ballGame.constants.DEADZONE;
+    for (var a = 0; a < pad.axes.length; a++) {
+        if (Math.abs(pad.axes[a]) > DEADZONE) return true;
+    }
+    for (var b = 0; b < pad.buttons.length; b++) {
+        if (pad.buttons[b] && pad.buttons[b].pressed) return true;
+    }
+    return false;
+}
+
+// Resolve the live Gamepad object. Snapshots from the connect event go stale
+// immediately in Chrome, and the old code always read getGamepads()[0] -- with
+// two controllers paired, slot 0 is frequently the idle one, so the stick the
+// player was holding did nothing.
+ballGame.main.resolvePad = function() {
+    const state = ballGame.state;
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+
+    var current = (state.gamepadIndex !== null) ? pads[state.gamepadIndex] : null;
+
+    // Keep the current pad as long as the player is actually using it.
+    if (current && current.connected && padHasInput(current)) return current;
+
+    // Otherwise hand control to whichever pad is being touched right now, so
+    // putting one controller down and picking the other up just works.
+    var fallback = null;
+    for (var i = 0; i < pads.length; i++) {
+        var p = pads[i];
+        if (!p || !p.connected) continue;
+        if (!fallback) fallback = p;
+        if (padHasInput(p)) {
+            state.gamepadIndex = p.index;
+            state.gamepad = p;
+            return p;
+        }
+    }
+
+    // Nobody is touching anything: stay on the current pad if it still
+    // exists, else fall back to the first connected one.
+    var keep = (current && current.connected) ? current : fallback;
+    state.gamepadIndex = keep ? keep.index : null;
+    state.gamepad = keep;
+    return keep;
+};
+
+function buttonValue(pad, index) {
+    var b = pad.buttons[index];
+    if (!b) return 0;
+    return typeof b.value === 'number' ? b.value : (b.pressed ? 1 : 0);
+}
+
+function buttonDown(pad, index) {
+    return !!(pad.buttons[index] && pad.buttons[index].pressed);
+}
+
+// Rising edge: true only on the frame the button goes down. Without this,
+// a held button fires ~60x/second -- which made the pause toggle flicker
+// on/off every frame and the restart button re-roll the level continuously.
+function buttonPressed(pad, index) {
+    const state = ballGame.state;
+    return buttonDown(pad, index) && !state.prevPadButtons[index];
+}
+
+function snapshotButtons(pad) {
+    const state = ballGame.state;
+    state.prevPadButtons.length = pad.buttons.length;
+    for (var i = 0; i < pad.buttons.length; i++) {
+        state.prevPadButtons[i] = buttonDown(pad, i);
+    }
+}
+
+// Apply the deadzone and rescale so motion starts from 0 at the deadzone
+// edge instead of jumping straight to full rate.
+function applyDeadzone(v) {
+    const DEADZONE = ballGame.constants.DEADZONE;
+    if (Math.abs(v) <= DEADZONE) return 0;
+    return (v - Math.sign(v) * DEADZONE) / (1 - DEADZONE);
+}
+
+// ─── setPaused ──────────────────────────────────────────
+ballGame.main.setPaused = function(paused) {
+    const state = ballGame.state;
+    if (paused) {
+        state.gameState = 'paused';
+        overlayTitle.textContent = 'Paused';
+        overlaySubtitle.textContent = 'Press START or Y to resume';
+        finalScore.style.display = 'none';
+        startBtn.textContent = 'RESUME';
+        overlay.classList.remove('hidden');
+    } else {
+        state.gameState = 'playing';
+        overlay.classList.add('hidden');
+    }
+};
+
+// ─── pollGamepad ────────────────────────────────────────
+// Runs every frame from animate(), not from update(). update() bails out
+// early unless gameState === 'playing', so the old in-update pause handler
+// could pause the game but could never un-pause it.
+ballGame.main.pollGamepad = function() {
+    const state = ballGame.state;
+    const pad = ballGame.main.resolvePad();
+    const status = document.getElementById('controllerStatus');
+
+    if (!pad) {
+        if (status) status.style.display = 'none';
+        state.padInput.throttle = state.padInput.brake = state.padInput.steer = 0;
+        state.prevPadButtons.length = 0;
+        return;
+    }
+
+    if (status) status.style.display = 'block';
+
+    // --- global buttons (edge triggered) ---
+    if (buttonPressed(pad, BTN.START) || buttonPressed(pad, BTN.Y)) {
+        if (state.gameState === 'playing') ballGame.main.setPaused(true);
+        else if (state.gameState === 'paused') ballGame.main.setPaused(false);
+    }
+
+    if (buttonPressed(pad, BTN.A)) {
+        if (state.gameState === 'gameover' || state.gameState === 'menu') ballGame.main.startGame();
+        else if (state.gameState === 'paused') ballGame.main.setPaused(false);
+    }
+
+    // --- analog driving intent ---
+    // axes[1] is -1 when the stick is pushed UP. The old code accelerated on
+    // axisY > DEADZONE, i.e. it was inverted: pulling back sped you up.
+    var stickY = -applyDeadzone(pad.axes[1] || 0);
+    var stickX = applyDeadzone(pad.axes[0] || 0);
+
+    var rt = buttonValue(pad, BTN.RT);
+    var lt = buttonValue(pad, BTN.LT);
+
+    var throttle = Math.max(stickY > 0 ? stickY : 0, rt);
+    var brake = Math.max(stickY < 0 ? -stickY : 0, lt);
+    if (buttonDown(pad, BTN.B)) brake = 3;   // B = hard brake
+
+    // LB/RB are buttons 4/5 in the standard mapping; the old code used 6/7,
+    // which are the analog triggers.
+    var steer = stickX;
+    if (buttonDown(pad, BTN.LB)) steer -= 0.5;
+    if (buttonDown(pad, BTN.RB)) steer += 0.5;
+    if (buttonDown(pad, BTN.DPAD_L)) steer -= 1;
+    if (buttonDown(pad, BTN.DPAD_R)) steer += 1;
+
+    state.padInput.throttle = Math.max(0, Math.min(1, throttle));
+    state.padInput.brake = Math.max(0, brake);
+    state.padInput.steer = Math.max(-1, Math.min(1, steer));
+
+    snapshotButtons(pad);
 };
 
 // ─── startGame ──────────────────────────────────────────
@@ -70,6 +256,8 @@ ballGame.main.startGame = function() {
     state.currentAngle = 0;
     state.roadPoints = [];
     state.obstacles = [];
+    state.steerInput = 0;
+    state.padInput.throttle = state.padInput.brake = state.padInput.steer = 0;
 
     // Generate initial road
     ballGame.road.generateRoadPoints(200);
@@ -79,6 +267,7 @@ ballGame.main.startGame = function() {
     // Position ball at start
     var startPos = state.roadCurve.getPoint(0.05);
     state.ballGroup.position.set(startPos.x, config.BALL_RADIUS, startPos.z);
+    ballGame.renderer.followPlayer(startPos.x, startPos.z);
 
     // Position camera directly behind ball at start
     state.camera.position.set(startPos.x, config.CAMERA_HEIGHT, startPos.z + config.CAMERA_LOOK_AHEAD);
@@ -120,6 +309,14 @@ ballGame.main.gameOver = function() {
     overlay.classList.remove('hidden');
 };
 
+// ─── onStartButton ──────────────────────────────────────
+// The overlay button doubles as RESUME while paused, so clicking it must not
+// wipe the run.
+ballGame.main.onStartButton = function() {
+    if (ballGame.state.gameState === 'paused') ballGame.main.setPaused(false);
+    else ballGame.main.startGame();
+};
+
 // ─── update (main game loop) ────────────────────────────
 ballGame.main.update = function(dt) {
     const state = ballGame.state;
@@ -129,93 +326,36 @@ ballGame.main.update = function(dt) {
     if (state.gameState !== 'playing') return;
     if (!state.roadCurve) return;
 
-    var gp = state.gamepad ? navigator.getGamepads()[0] : null;
-    var useController = state.gamepad !== null;
+    // Keyboard and pad are merged rather than exclusive. The old code picked
+    // one or the other, so a connected-but-idle controller disabled the
+    // keyboard entirely -- and if the pad then vanished from getGamepads(),
+    // neither branch ran and the ball became uncontrollable.
+    var pad = state.padInput;
+    var throttle = pad.throttle;
+    var brake = pad.brake;
+    var steer = pad.steer;
 
-    if (useController && gp) {
-        var axisY = gp.axes[1]; // Left stick vertical
-        var axisX = gp.axes[0]; // Left stick horizontal
-        var buttons = gp.buttons;
+    if (state.keys['ArrowUp']) throttle = 1;
+    if (state.keys['ArrowDown']) brake = Math.max(brake, 1);
+    if (state.keys['ArrowLeft']) steer -= 1;
+    if (state.keys['ArrowRight']) steer += 1;
+    steer = Math.max(-1, Math.min(1, steer));
 
-        // Y button (index 2) - Pause toggle
-        if (buttons[2] && buttons[2].pressed) {
-            if (state.gameState === 'playing') {
-                state.gameState = 'menu';
-                overlay.classList.remove('hidden');
-                overlayTitle.textContent = 'Paused';
-                overlaySubtitle.textContent = 'Press Y again to resume';
-                finalScore.style.display = 'none';
-                startBtn.textContent = 'START';
-            } else if (state.gameState === 'menu') {
-                overlay.classList.add('hidden');
-                state.gameState = 'playing';
-            }
-            return;
+    // Speed
+    if (brake > 0) {
+        state.speed = Math.max(state.speed - config.DECELERATION * brake, 0);
+    } else if (throttle > 0) {
+        state.speed = Math.min(state.speed + config.ACCELERATION * throttle, config.MAX_SPEED);
+    } else {
+        if (state.speed < config.BASE_SPEED) {
+            state.speed = Math.min(state.speed + config.ACCELERATION * 0.5, config.BASE_SPEED);
         }
-
-        // B button (index 1) - Quick brake
-        if (buttons[1] && buttons[1].pressed) {
-            state.speed = Math.max(state.speed - config.DECELERATION * 3, 0);
-            useController = false;
-        } else {
-            // Normal speed control from stick
-            if (axisY > DEADZONE) {
-                state.speed = Math.min(state.speed + config.ACCELERATION, config.MAX_SPEED);
-            } else if (axisY < -DEADZONE) {
-                state.speed = Math.max(state.speed - config.DECELERATION, 0);
-            } else {
-                if (state.speed < config.BASE_SPEED) {
-                    state.speed = Math.min(state.speed + config.ACCELERATION * 0.5, config.BASE_SPEED);
-                }
-                state.speed = Math.max(state.speed - config.FRICTION, 0);
-            }
-
-            // Steering from stick horizontal
-            if (axisX < -DEADZONE) {
-                state.lateralOffset -= config.STEER_SPEED * (1 + state.speed * 2);
-            }
-            if (axisX > DEADZONE) {
-                state.lateralOffset += config.STEER_SPEED * (1 + state.speed * 2);
-            }
-        }
-
-        // LB (index 6) - Fine steer left
-        if (buttons[6] && buttons[6].pressed) {
-            state.lateralOffset -= config.STEER_SPEED * 0.5 * (1 + state.speed * 2);
-            useController = false;
-        }
-        // RB (index 7) - Fine steer right
-        if (buttons[7] && buttons[7].pressed) {
-            state.lateralOffset += config.STEER_SPEED * 0.5 * (1 + state.speed * 2);
-            useController = false;
-        }
-
-        document.getElementById('controllerStatus').style.display = 'block';
+        state.speed = Math.max(state.speed - config.FRICTION, 0);
     }
 
-    if (!useController) {
-        // Speed control from keyboard
-        if (state.keys['ArrowUp']) {
-            state.speed = Math.min(state.speed + config.ACCELERATION, config.MAX_SPEED);
-        } else if (state.keys['ArrowDown']) {
-            state.speed = Math.max(state.speed - config.DECELERATION, 0);
-        } else {
-            if (state.speed < config.BASE_SPEED) {
-                state.speed = Math.min(state.speed + config.ACCELERATION * 0.5, config.BASE_SPEED);
-            }
-            state.speed = Math.max(state.speed - config.FRICTION, 0);
-        }
-
-        // Steering from keyboard
-        if (state.keys['ArrowLeft']) {
-            state.lateralOffset -= config.STEER_SPEED * (1 + state.speed * 2);
-        }
-        if (state.keys['ArrowRight']) {
-            state.lateralOffset += config.STEER_SPEED * (1 + state.speed * 2);
-        }
-
-        document.getElementById('controllerStatus').style.display = 'none';
-    }
+    // Steering (analog: full deflection matches the old keyboard rate)
+    state.lateralOffset += steer * config.STEER_SPEED * (1 + state.speed * 2);
+    state.steerInput = steer;
 
     // Clamp lateral offset to road width
     var maxLateral = config.ROAD_WIDTH / 2 - config.BALL_RADIUS - 0.2;
@@ -254,11 +394,14 @@ ballGame.main.update = function(dt) {
     state.ballGroup.position.x = targetX;
     state.ballGroup.position.z = targetZ;
 
-    // Ball rolling animation
+    // Keep the finite ground plane and the sun's shadow frustum centred on
+    // the ball, otherwise the player drives off the edge of the world.
+    ballGame.renderer.followPlayer(targetX, targetZ);
+
+    // Ball rolling animation (lean follows whichever device is steering)
     var rollSpeed = state.speed * 10;
     state.ball.rotation.x -= rollSpeed * dt;
-    if (state.keys['ArrowLeft']) state.ball.rotation.z += rollSpeed * dt * 0.3;
-    if (state.keys['ArrowRight']) state.ball.rotation.z -= rollSpeed * dt * 0.3;
+    state.ball.rotation.z -= state.steerInput * rollSpeed * dt * 0.3;
 
     // Spawn obstacles ahead
     var currentDist = state.travelDistance * config.ROAD_SEGMENT_LENGTH;
@@ -330,15 +473,11 @@ ballGame.main.animate = function() {
     const state = ballGame.state;
     var dt = Math.min(state.clock.getDelta(), 0.05);
 
-    ballGame.main.update(dt);
+    // Polled outside update() so pause/resume and restart keep working while
+    // the game is not in the 'playing' state.
+    ballGame.main.pollGamepad();
 
-    // Check controller A button for restart
-    if (state.gamepad) {
-        var gp = navigator.getGamepads()[0];
-        if (gp && gp.buttons[0] && gp.buttons[0].pressed && state.gameState === 'gameover') {
-            ballGame.main.startGame();
-        }
-    }
+    ballGame.main.update(dt);
 
     state.renderer.render(state.scene, state.camera);
 };

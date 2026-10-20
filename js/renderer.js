@@ -37,6 +37,11 @@ ballGame.renderer.init = function() {
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
     dirLight.position.set(20, 40, 10);
     dirLight.castShadow = true;
+    // The shadow frustum is built around the light's target. Keep both the
+    // light and its target parented to the ball (see followPlayer) or shadows
+    // silently stop rendering once the player leaves the ~50 unit box below.
+    state.scene.add(dirLight.target);
+    state.dirLight = dirLight;
     dirLight.shadow.mapSize.width = 2048;
     dirLight.shadow.mapSize.height = 2048;
     dirLight.shadow.camera.near = 1;
@@ -55,6 +60,29 @@ ballGame.renderer.init = function() {
     ground.position.y = -0.1;
     ground.receiveShadow = true;
     state.scene.add(ground);
+    state.ground = ground;
+};
+
+// ─── followPlayer ───────────────────────────────────────
+// The ground plane is finite (500x500) and the sun's shadow camera only
+// covers a 100x100 box around its target. Both were left anchored at the
+// origin while the road runs off towards -Z forever, so past ~250 units the
+// player drove off the edge of the world (sky visible through the road) and
+// shadows died even earlier. Re-centre both on the ball every frame; fog
+// (60-140) hides the plane's edges, so the player never sees the seam.
+ballGame.renderer.followPlayer = function(x, z) {
+    const state = ballGame.state;
+
+    if (state.ground) {
+        state.ground.position.x = x;
+        state.ground.position.z = z;
+    }
+
+    if (state.dirLight) {
+        state.dirLight.position.set(x + 20, 40, z + 10);
+        state.dirLight.target.position.set(x, 0, z);
+        state.dirLight.target.updateMatrixWorld();
+    }
 };
 
 ballGame.renderer.onResize = function() {
